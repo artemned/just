@@ -1,0 +1,388 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include "setting.h"
+#include "writing_in_journal.h"
+#include "graphic.h"
+#include <QUrl>
+#include <QModbusRtuSerialMaster>
+
+
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow),
+    modbusDevice(nullptr)
+{
+    ui->setupUi(this);
+    ui->writeTable->addItem(tr("Input Registers"), 1);
+    ui->writeTable->addItem(tr("Holding Registers"), 2);
+    ui->slaveBox->setValue(1);
+    setFixedSize(603,413);
+    setAutoFillBackground(true);
+    m_settingsDialog = new setting(this);
+    m_settingsDialog->setWindowFlags(Qt::Window);
+    m_settingsDialog->setFixedSize(222,246);
+    journal=new Writing_in_journal(this);
+    journal->setWindowFlags(Qt::Window);
+    journal->setFixedSize(716,490);
+    graphic= new Graphic(this);
+    graphic->setWindowFlags(Qt::Window);
+    graphic->setFixedSize(550,397);
+    window_pbar=new progress_window(this);
+    window_pbar-> setWindowFlags(Qt::Window |Qt::WindowMinimizeButtonHint);
+    thr=new  MyThread("current");
+    init();
+
+}
+
+MainWindow::~MainWindow()
+{
+    if(modbusDevice)
+        modbusDevice->disconnectDevice();
+
+    delete modbusDevice;
+    delete timer;
+    delete ui;
+
+}
+
+void MainWindow::init() {
+    modbusDevice = new QModbusRtuSerialMaster(this);
+    connect(modbusDevice, &QModbusClient::errorOccurred, [this](QModbusDevice::Error) {
+                statusBar()->showMessage(modbusDevice->errorString(), 5000);
+
+
+    });
+
+    if(modbusDevice) {
+        connect(modbusDevice, &QModbusClient::stateChanged,
+                 this, &MainWindow::onStateChanged);
+       connect(ui->actionOptions, &QAction::triggered, m_settingsDialog, &QDialog::show);
+       connect(ui->actionsetting,&QAction::triggered,journal,&QDialog::show);
+        connect(ui->actionbuild,&QAction::triggered,graphic,&QDialog::show);
+         connect(graphic,SIGNAL(sendB(bool)),this,SLOT(what(bool)));
+         connect(this,SIGNAL(sendFl(int)),graphic,SLOT(priem(int)));
+    }
+}
+
+void MainWindow::ReadTimer()//отправляет запрос on reapet
+{
+
+
+    if (!modbusDevice)
+          return;
+      ui->readValue->clear();
+      statusBar()->clearMessage();
+
+    if(journal->myset().flag)
+
+   {
+     if (auto *lastRequest = modbusDevice->sendReadRequest(readRequest(), ui->slaveBox->value())) {
+           if(!lastRequest->isFinished())
+             {
+
+                connect(lastRequest, &QModbusReply::finished, this, &MainWindow::readReadyTwo);
+
+             }
+        else
+
+          delete lastRequest; // broadcast replies return immediately
+            }else
+              {
+
+              statusBar()->showMessage(tr("Read error: ")
+                + modbusDevice->errorString(), 5000);
+              }
+
+      }
+       else if(!journal->myset().flag)
+      {
+
+
+    if (auto *lastRequest = modbusDevice->sendReadRequest(readRequest(), ui->slaveBox->value())) {
+        if (!lastRequest->isFinished())
+            {
+
+             connect(lastRequest, &QModbusReply::finished, this, &MainWindow::readReady);
+
+            }
+          else
+
+              delete lastRequest; // broadcast replies return immediately
+        } else {
+
+              statusBar()->showMessage(tr("Read error: ") + modbusDevice->errorString(), 5000);
+             }
+      }
+
+
+
+}
+
+
+
+
+
+void MainWindow::onStateChanged(int state) {
+    if (state == QModbusDevice::UnconnectedState)
+        ui->connectButton->setText(tr("Connect"));
+    else if (state == QModbusDevice::ConnectedState)
+        ui->connectButton->setText(tr("Disconnect"));
+}
+
+
+void MainWindow::on_readButton_clicked()
+{
+       ui->readButton->setEnabled(false);
+    if(!timer)
+    {
+        timer=new QTimer;
+    }
+                double seconds=ui->surveyBox->value()*1000;
+                if(seconds==0.00)seconds=1000;
+              connect(timer, SIGNAL(timeout()), this, SLOT(ReadTimer()));
+               timer->start(seconds);
+
+}
+
+void MainWindow::readReady()
+{
+
+    auto lastRequest = qobject_cast<QModbusReply *>(sender());
+    if (!lastRequest)
+        return;
+
+    if (lastRequest->error() == QModbusDevice::NoError) {
+        const QModbusDataUnit unit = lastRequest->result();
+        for (uint i = 0; i < unit.valueCount(); i++) {
+            const QString entry = tr("Address: %1, Value: %2").arg(unit.startAddress())
+                                     .arg(QString::number(unit.value(i)));
+            ui->readValue->addItem(entry);
+        }
+    } else if (lastRequest->error() == QModbusDevice::ProtocolError) {
+        statusBar()->showMessage(tr("Read response error: %1 (Mobus exception: 0x%2)").
+                                    arg(lastRequest->errorString()).
+                                    arg(lastRequest->rawResult().exceptionCode(), -1, 16), 5000);
+    } else {
+        statusBar()->showMessage(tr("Read response error: %1 (code: 0x%2)").
+                                    arg(lastRequest->errorString()).
+                                    arg(lastRequest->error(), -1, 16), 5000);
+    }
+
+    lastRequest->deleteLater();
+}
+
+void MainWindow::readReadyTwo()
+{
+auto lastRequest = qobject_cast<QModbusReply *>(sender());
+if (!lastRequest)
+    return;
+
+
+
+connect(this,SIGNAL(GiveMyFlag(bool)),journal,SLOT(WhatFlags(bool)));
+
+connect(journal,SIGNAL(sendFlag(int)),this,SLOT(addFlagtable(int)));
+emit GiveMyFlag(GiveFlag);
+
+
+if (lastRequest->error() == QModbusDevice::NoError) {
+    const QModbusDataUnit unit = lastRequest->result();
+    for (uint i = 0; i < unit.valueCount(); i++) {
+        const QString entry = tr("Address: %1, Value: %2").arg(unit.startAddress())
+                                 .arg(QString::number(unit.value(i)));
+        ui->readValue->addItem(entry);
+       //теперь добавляем дату и время
+        //QString time_format = "dd-MM-yyyy HH:mm:ss"; пусть будет
+        QDateTime dt=QDateTime::currentDateTime();
+        QString datet=dt.toString(Qt::ISODate);
+
+ journal->myset().Flagtables;                   //Qt::ISODate);         //);
+
+         if(journal->myset().write){
+             switch(flagTables)
+            {
+             case 0:journal->myset().db->SensorsAutoTwo(unit.value(journal->myset().reg1),
+                                              unit.value(journal->myset().reg2),
+                                              datet);
+                 break;
+             case 1: journal->myset().db->SensorsAutoDouble(unit.value(journal->myset().reg1),
+                                                         unit.value(journal->myset().reg2),
+                                                         datet);
+                 break;
+             }
+
+        }else{
+
+current_times.push_back(datet);
+vpair.push_back({unit.value(journal->myset().reg1),unit.value(journal->myset().reg2)});
+qDebug()<<vpair.size();
+        if(vpair.size()==100)
+        {
+            thr->setRun(flagTables,journal->myset().db,vpair,current_times);
+            thr->start();
+
+        }
+
+        }
+
+    }
+} else if (lastRequest->error() == QModbusDevice::ProtocolError) {
+    statusBar()->showMessage(tr("Read response error: %1 (Mobus exception: 0x%2)").
+                                arg(lastRequest->errorString()).
+                                arg(lastRequest->rawResult().exceptionCode(), -1, 16), 5000);
+} else {
+    statusBar()->showMessage(tr("Read response error: %1 (code: 0x%2)").
+                                arg(lastRequest->errorString()).
+                                arg(lastRequest->error(), -1, 16), 5000);
+}
+
+lastRequest->deleteLater();
+}
+
+
+void MainWindow::on_writeButton_clicked()
+{
+    if (!modbusDevice)
+        return;
+    statusBar()->clearMessage();
+
+    QModbusDataUnit writeUnit = writeRequest();
+    QModbusDataUnit::RegisterType table = writeUnit.registerType();
+    writeUnit.setValue(0, ui->writeBox->value());
+
+    if (auto *lastRequest = modbusDevice->sendWriteRequest(writeUnit, ui->slaveBox->value())) {
+        if (!lastRequest->isFinished()) {
+            connect(lastRequest, &QModbusReply::finished, this, [this, lastRequest]() {
+                if (lastRequest->error() == QModbusDevice::ProtocolError) {
+                    statusBar()->showMessage(tr("Write response error: %1 (Mobus exception: 0x%2)")
+                        .arg(lastRequest->errorString()).arg(lastRequest->rawResult().exceptionCode(), -1, 16),
+                        5000);
+                } else if (lastRequest->error() != QModbusDevice::NoError) {
+                    statusBar()->showMessage(tr("Write response error: %1 (code: 0x%2)").
+                        arg(lastRequest->errorString()).arg(lastRequest->error(), -1, 16), 5000);
+                }
+                lastRequest->deleteLater();
+            });
+        } else {
+            // broadcast replies return immediately
+            lastRequest->deleteLater();
+        }
+    } else {
+        statusBar()->showMessage(tr("Write error: ") + modbusDevice->errorString(), 5000);
+    }
+}
+
+QModbusDataUnit MainWindow::readRequest() const
+{
+
+    int startAddress = ui->startBox->value();
+    //Q_ASSERT(startAddress >= 0 && startAddress < 10);
+   // int numberOfEntries = qMin(ui->countBox->value(), 10 - startAddress);
+     if(ui->countBox->value()>10)ui->countBox->setValue(10);
+  switch(ui->writeTable->currentData().toInt()){
+ case 1: return QModbusDataUnit(QModbusDataUnit::InputRegisters,
+             startAddress, ui->countBox->value()); break;
+
+ case 2: return  QModbusDataUnit(QModbusDataUnit::HoldingRegisters,
+             startAddress, ui->countBox->value());break;
+
+}
+
+}
+
+QModbusDataUnit MainWindow::writeRequest() const
+{
+    return QModbusDataUnit(QModbusDataUnit::HoldingRegisters, ui->startBox->value(),
+                           WRITE_SIZE);
+}
+
+void MainWindow::on_connectButton_clicked()
+{
+    if (!modbusDevice)
+        return;
+    statusBar()->clearMessage();
+    if (modbusDevice->state() != QModbusDevice::ConnectedState) {
+
+
+        modbusDevice->setConnectionParameter(QModbusDevice::SerialPortNameParameter,
+            ui->PortEdit->text());
+        modbusDevice->setConnectionParameter(QModbusDevice::SerialParityParameter,
+            m_settingsDialog->settings().parity);
+        modbusDevice->setConnectionParameter(QModbusDevice::SerialBaudRateParameter,
+            m_settingsDialog->settings().baud);
+        modbusDevice->setConnectionParameter(QModbusDevice::SerialDataBitsParameter,
+            m_settingsDialog->settings().dataBits);
+        modbusDevice->setConnectionParameter(QModbusDevice::SerialStopBitsParameter,
+            m_settingsDialog->settings().stopBits);
+
+        //if(!db)db.reset(new DbManager(PATH));
+          if(timer==nullptr)timer=new QTimer;
+
+          if (!modbusDevice->connectDevice()) {
+            statusBar()->showMessage(tr("Connect failed: ") + modbusDevice->errorString(), 5000);
+        }
+    } else {
+        modbusDevice->disconnectDevice();
+    }
+
+
+
+
+
+
+
+ }
+
+
+void MainWindow::on_readButton_2_clicked()
+{
+
+
+
+    if(timer!=nullptr){
+    delete  timer;
+    timer=nullptr;
+    ui->readValue->clear();
+   }
+
+
+
+if(!vpair.empty()){
+
+
+    window_pbar->setMax(current_times.size()-1);
+    window_pbar->setModal(true);
+
+    thr->setRun(flagTables,journal->myset().db,vpair,
+                current_times);
+
+  // window_pbar->show();
+    QMessageBox::information(this,"Information","Operation Complete");
+
+connect(thr,SIGNAL(sendInt(int)),window_pbar,SLOT(setProgValue(int)));
+connect(thr,SIGNAL(sendStr(QString)),window_pbar,SLOT(setText(QString)));
+thr->start();
+
+}
+    vpair.clear();
+    current_times.clear();
+    ui->readButton->setEnabled(true);
+}
+
+void MainWindow::addFlagtable(int f)
+{
+    flagTables=f;
+}
+
+void MainWindow::what(bool b)
+{
+    emit sendFl(journal->myset().Flagtables);
+}
+
+
+
+
+
+
+
